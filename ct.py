@@ -415,7 +415,8 @@ def cmd_add(args):
             messages.append(f"  반대 방향 규칙({typed_form(opposite)} → {converted_form(opposite)})은 지웠어요.")
         was_kept = words.is_kept(item)
         if forget_undos(words, item):
-            messages.append("  그대로 둘 말에서는 뺐어요." if was_kept else "  되돌린 기록은 지웠어요.")
+            messages.append(f"  그대로 둘 말에서 뺐어요: {typed_form(item)} ({where(item)})" if was_kept
+                            else "  되돌린 기록은 지웠어요.")
         words.always[item] = int(time.time())
         return messages + other_language_warning(item, lex)
 
@@ -440,29 +441,25 @@ def other_language_warning(item, lex):
 
 
 def cmd_keep(args):
-    keys, script = parse_word(args.word)
-    target = args.target
-    if not target:
-        # Guess the state the user has already been undoing; otherwise keep the word as written.
-        hangul, words = to_hangul(keys), Words(Path(args.settings))
-        undone = [t for t, s in (("en", "english"), ("ko", "korean")) if (s, keys) in words.undone]
-        guess = undone[0] if len(undone) == 1 else ("en" if script == "latin" else "ko")
-        target = choose(f"'{args.word}'를 어떻게 그대로 둘까요?", [
-            (f"영어 상태에서 친 {particle(keys, '을', '를')} {particle(hangul, '으로', '로')} 안 바꾸기"
-             + undo_note(words, ("english", keys)), "en"),
-            (f"한글 상태에서 친 {particle(hangul, '을', '를')} {particle(keys, '으로', '로')} 안 바꾸기"
-             + undo_note(words, ("korean", keys)), "ko"),
-        ], guess)
-    item = ("english" if target == "en" else "korean", keys)
+    # Both readings are words the user types, so Catchtype shouldn't pick one: keep the keys as typed in both states.
+    keys, _ = parse_word(args.word)
+    hangul = to_hangul(keys)
+    pair = [("english", keys), ("korean", keys)]
+    lex = Lexicon(DEFAULT_EXE)
 
     def edit(words):
-        if words.is_kept(item) and item not in words.always:
-            return [f"이미 그대로 둘 말이에요: {typed_form(item)} ({where(item)})"]
-        messages = [f"그대로 둘 말에 더했어요: {converted_form(item)} 대신 {typed_form(item)} 그대로 둬요 ({where(item)})"]
-        if words.always.pop(item, None) is not None:
-            messages.append("  늘 바꿀 말에서는 뺐어요.")
-        words.undone[item] = max(words.undone.get(item, 0), UNDOS_TO_LEARN)
-        words.learned.setdefault(item, int(time.time()))
+        if all(words.is_kept(i) and i not in words.always for i in pair):
+            return [f"이미 그대로 둘 말이에요: {keys} / {hangul} (어느 상태든 친 그대로)"]
+        messages = [f"그대로 둘 말에 더했어요: 영어 상태에선 {keys}, 한글 상태에선 {hangul} 그대로 둬요"]
+        for item in pair:
+            if words.always.pop(item, None) is not None:
+                messages.append(f"  늘 바꿀 말({typed_form(item)} → {converted_form(item)})에서는 뺐어요.")
+            words.undone[item] = max(words.undone.get(item, 0), UNDOS_TO_LEARN)
+            words.learned.setdefault(item, int(time.time()))
+        if hangul not in lex.korean:
+            messages.append(f"  참고: {particle(hangul, '은', '는')} Catchtype 한국어 사전에 없는 말이에요. "
+                            f"{particle(hangul, '을', '를')} 쓸 일이 없다면 ct add {keys} 쪽이 더 맞아요 "
+                            f"(한글 상태에서 쳐도 {keys}로 바뀌어요).")
         return messages
 
     change(args, edit)
@@ -516,10 +513,19 @@ def cmd_list(args):
         also = f" · {STATE_NAME[opposite[0]]} 상태에선 {typed_form(opposite)} 그대로" if words.is_kept(opposite) else ""
         return f"{typed_form(item)} → {converted_form(item)}", where(item) + also
 
+    # ct keep keeps both states; one state alone is usually Catchtype's own learning from three undos.
+    kept_states = {}
+    for state, keys in kept:
+        kept_states.setdefault(keys, []).append(state)
+    kept_rows = [(f"{keys} / {to_hangul(keys)}", "어느 상태든 친 그대로") if len(states) == 2 else
+                 (f"{typed_form((states[0], keys))}  (→ {converted_form((states[0], keys))} 안 바꿈)",
+                  where((states[0], keys)) + "만")
+                 for keys, states in kept_states.items()]
+
     print(f"늘 바꿀 말 ({len(words.always)})")
     show([always_row(i) for i in words.always])
-    print(f"그대로 둘 말 ({len(kept)})")
-    show([(f"{typed_form(i)}  (→ {converted_form(i)} 안 바꿈)", where(i)) for i in kept])
+    print(f"그대로 둘 말 ({len(kept_rows)})")
+    show(kept_rows)
     print(f"배우는 중 ({len(learning)}) - 같은 말을 {UNDOS_TO_LEARN}번 되돌리면 그대로 둘 말이 돼요")
     show([(f"{typed_form(i)} → {converted_form(i)}  ({words.undone[i]}/{UNDOS_TO_LEARN})", where(i)) for i in learning])
     if hidden:
@@ -530,11 +536,12 @@ EXAMPLES = """\
 예:
   ct add 채며쇅       안 바뀐 말을 늘 바꿔요 (ct add coauthor 도 같아요)
                       영어 상태에서 친 coauthor는 그대로 두는 것도 함께 넣어요
-  ct keep wls         바뀌면 안 되는 말을 친 그대로 둬요
+  ct keep wls         둘 다 쓰는 말은 Catchtype이 정하지 않게 해요 (ct keep 진 도 같아요)
+                      영어 상태에선 wls, 한글 상태에선 진, 친 그대로 둬요
   ct forget absy      어느 목록에서든 그 말을 지워요 (잘못 배운 말, 잘못 더한 말)
   ct list             지금 목록을 보여 줘요
 
-add와 keep은 두 가지 해석을 보여 주고 추측한 쪽을 Enter로 확인받아요.
+add는 두 가지 해석을 보여 주고 추측한 쪽을 Enter로 확인받아요.
 --en(영어가 남게) 또는 --ko(한글이 남게)를 붙이면 묻지 않고 바로 써요.
 바꿀 때마다 Catchtype을 잠깐 껐다 켜요. 고치기 전 설정은 %APPDATA%\\Catchtype\\ct-backups에 남아요.
 """
@@ -553,8 +560,7 @@ def main():
     for name, run, help_text, en_help, ko_help in [
         ("add", cmd_add, "바뀌어야 하는데 안 바뀌는 말을 늘 바꿔요",
          "영어로 바뀌게 (한글 상태에서 친 말)", "한글로 바뀌게 (영어 상태에서 친 말)"),
-        ("keep", cmd_keep, "바뀌면 안 되는데 바뀌는 말을 친 그대로 둬요",
-         "영어 그대로 두기 (영어 상태에서 친 말)", "한글 그대로 두기 (한글 상태에서 친 말)"),
+        ("keep", cmd_keep, "둘 다 쓰는 말을 어느 상태든 친 그대로 둬요", None, None),
         ("forget", cmd_forget, "어느 목록에서든 그 말을 지워요", None, None),
     ]:
         p = sub.add_parser(name, parents=[hidden], help=help_text, description=help_text)
