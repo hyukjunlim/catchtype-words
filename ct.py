@@ -342,24 +342,54 @@ def start_catchtype(exe):
 
 
 def change(args, edit):
-    """Apply `edit(words) -> messages` with Catchtype stopped. An edit that returns no messages changes nothing."""
+    """Apply `edit(words) -> messages` and then `settle`; stops Catchtype and writes only if the lists changed."""
     path = Path(args.settings)
-    messages = edit(Words(path))
-    if not messages:
-        return
-    exe = None if args.no_restart else stop_catchtype()
-    try:
-        words = Words(path)  # re-read: Catchtype may have saved on its way out
-        messages = edit(words)
-        if messages:
+    words = Words(path)
+    before = words.lists()
+    messages = edit(words) + settle(words)
+    if words.lists() != before:
+        exe = None if args.no_restart else stop_catchtype()
+        try:
+            words = Words(path)  # re-read: Catchtype may have saved on its way out
+            messages = edit(words) + settle(words)
             backup(path)
             words.save(path)
             if path == SETTINGS:
                 snapshot(words)
-    finally:
-        if exe:
-            start_catchtype(exe)
+        finally:
+            if exe:
+                start_catchtype(exe)
     print("\n".join(messages))
+
+
+def other_state(state):
+    return "english" if state == "korean" else "korean"
+
+
+def settle(words):
+    """Make Catchtype's learned lists agree with the user's always-convert rules; returns what it changed.
+
+    An always-converted word is the word the user wants, so the same keys typed in the other state stay as typed.
+    Undo counts Catchtype keeps for an always-converted word are noise that would end up fighting the rule.
+    """
+    messages = []
+    for item in list(words.always):
+        if item not in words.always:  # dropped as the older half of a conflict
+            continue
+        opposite = (other_state(item[0]), item[1])
+        if opposite in words.always:  # converting in both states makes no sense, so the newer rule wins
+            older = min(item, opposite, key=words.always.get)
+            words.always.pop(older)
+            messages.append(f"  반대 방향 규칙({typed_form(older)} → {converted_form(older)})은 지웠어요.")
+            if older == item:
+                continue
+        if forget_undos(words, item):
+            messages.append(f"  {typed_form(item)} → {converted_form(item)}의 되돌린 기록은 지웠어요(이미 늘 바꾸는 말이라서).")
+        if not words.is_kept(opposite):
+            words.undone[opposite] = max(words.undone.get(opposite, 0), UNDOS_TO_LEARN)
+            words.learned.setdefault(opposite, int(time.time()))
+            messages.append(f"  {where(opposite)}는 {typed_form(opposite)} 그대로 둬요.")
+    return messages
 
 
 # ---------- commands ----------
@@ -378,9 +408,11 @@ def cmd_add(args):
 
     def edit(words):
         if item in words.always:
-            print(f"이미 늘 바꿀 말이에요: {typed_form(item)} → {converted_form(item)} ({where(item)})")
-            return []
+            return [f"이미 늘 바꿀 말이에요: {typed_form(item)} → {converted_form(item)} ({where(item)})"]
         messages = [f"늘 바꿀 말에 더했어요: {typed_form(item)} → {converted_form(item)} ({where(item)})"]
+        opposite = (other_state(item[0]), keys)
+        if words.always.pop(opposite, None) is not None:
+            messages.append(f"  반대 방향 규칙({typed_form(opposite)} → {converted_form(opposite)})은 지웠어요.")
         was_kept = words.is_kept(item)
         if forget_undos(words, item):
             messages.append("  그대로 둘 말에서는 뺐어요." if was_kept else "  되돌린 기록은 지웠어요.")
@@ -425,8 +457,7 @@ def cmd_keep(args):
 
     def edit(words):
         if words.is_kept(item) and item not in words.always:
-            print(f"이미 그대로 둘 말이에요: {typed_form(item)} ({where(item)})")
-            return []
+            return [f"이미 그대로 둘 말이에요: {typed_form(item)} ({where(item)})"]
         messages = [f"그대로 둘 말에 더했어요: {converted_form(item)} 대신 {typed_form(item)} 그대로 둬요 ({where(item)})"]
         if words.always.pop(item, None) is not None:
             messages.append("  늘 바꿀 말에서는 뺐어요.")
@@ -473,20 +504,32 @@ def cmd_list(args):
     words = Words(Path(args.settings))
     if Path(args.settings) == SETTINGS:
         snapshot(words)
-    kept = [item for item in {**words.undone, **words.learned} if words.is_kept(item)]
-    learning = [item for item, count in words.undone.items() if count < UNDOS_TO_LEARN and item not in words.learned]
+    implied = {(other_state(s), k) for s, k in words.always}  # shown on the always-convert line instead
+    decided = set(words.always) | implied
+    kept = [i for i in {**words.undone, **words.learned} if words.is_kept(i) and i not in decided]
+    learning = [i for i, count in words.undone.items() if count < UNDOS_TO_LEARN and i not in words.learned]
+    hidden = [i for i in words.undone if i in words.always] + [i for i in learning if i in implied]
+    learning = [i for i in learning if i not in decided]
+
+    def always_row(item):
+        opposite = (other_state(item[0]), item[1])
+        also = f" · {STATE_NAME[opposite[0]]} 상태에선 {typed_form(opposite)} 그대로" if words.is_kept(opposite) else ""
+        return f"{typed_form(item)} → {converted_form(item)}", where(item) + also
 
     print(f"늘 바꿀 말 ({len(words.always)})")
-    show([(f"{typed_form(i)} → {converted_form(i)}", where(i)) for i in words.always])
+    show([always_row(i) for i in words.always])
     print(f"그대로 둘 말 ({len(kept)})")
     show([(f"{typed_form(i)}  (→ {converted_form(i)} 안 바꿈)", where(i)) for i in kept])
     print(f"배우는 중 ({len(learning)}) - 같은 말을 {UNDOS_TO_LEARN}번 되돌리면 그대로 둘 말이 돼요")
     show([(f"{typed_form(i)} → {converted_form(i)}  ({words.undone[i]}/{UNDOS_TO_LEARN})", where(i)) for i in learning])
+    if hidden:
+        print(f"  (이미 늘 바꾸는 말의 되돌린 기록 {len(hidden)}개는 숨겼어요. 다음에 ct로 바꿀 때 지워요.)")
 
 
 EXAMPLES = """\
 예:
   ct add 채며쇅       안 바뀐 말을 늘 바꿔요 (ct add coauthor 도 같아요)
+                      영어 상태에서 친 coauthor는 그대로 두는 것도 함께 넣어요
   ct keep wls         바뀌면 안 되는 말을 친 그대로 둬요
   ct forget absy      어느 목록에서든 그 말을 지워요 (잘못 배운 말, 잘못 더한 말)
   ct list             지금 목록을 보여 줘요
