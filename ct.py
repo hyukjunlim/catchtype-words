@@ -194,19 +194,26 @@ def guess_add_target(keys, lex):
     return None
 
 
-def ask(question, options):
-    if not sys.stdin.isatty():
-        raise Stop(question + "\n자동으로 정하지 못했어요. --en 또는 --ko를 붙여 다시 해 주세요.")
+def choose(question, options, guess):
+    """Show both readings and let the user confirm one; `guess` (a value or None) is what Enter picks."""
     print(question)
-    for i, (label, _) in enumerate(options, 1):
-        print(f"  {i}) {label}")
+    for i, (label, value) in enumerate(options, 1):
+        print(f"  {i}) {label}" + ("   ← 추측 (Enter)" if value == guess else ""))
+    prompt = "번호 (Enter = 추측, 그 밖 = 취소): " if guess else "번호 (그 밖 = 취소): "
     try:
-        answer = input("번호: ").strip()
-    except EOFError:
-        answer = ""
-    if answer not in {str(i) for i in range(1, len(options) + 1)}:
-        raise Stop("아무것도 바꾸지 않았어요.")
-    return options[int(answer) - 1][1]
+        answer = input(prompt).strip()
+    except EOFError:  # no one to confirm, so write nothing
+        raise Stop("확인을 받지 못해 아무것도 바꾸지 않았어요. --en 또는 --ko를 붙이면 묻지 않아요.")
+    if answer == "" and guess:
+        return guess
+    if answer in {str(i) for i in range(1, len(options) + 1)}:
+        return options[int(answer) - 1][1]
+    raise Stop("아무것도 바꾸지 않았어요.")
+
+
+def undo_note(words, item):
+    count = words.undone.get(item)
+    return f"  (되돌린 기록 {count}번)" if count else ""
 
 
 # ---------- settings.json ----------
@@ -360,13 +367,13 @@ def change(args, edit):
 def cmd_add(args):
     keys, _ = parse_word(args.word)
     lex = Lexicon(DEFAULT_EXE)
-    target = args.target or guess_add_target(keys, lex)
+    target = args.target
     if not target:
-        hangul = to_hangul(keys)
-        target = ask(f"'{args.word}'를 어느 쪽으로 늘 바꿀까요?", [
-            (f"한글 상태에서 쳐서 나온 {hangul} → {keys}", "en"),
-            (f"영어 상태에서 쳐서 나온 {keys} → {hangul}", "ko"),
-        ])
+        hangul, words = to_hangul(keys), Words(Path(args.settings))
+        target = choose(f"'{args.word}'를 어느 쪽으로 늘 바꿀까요?", [
+            (f"한글 상태에서 친 {hangul} → {keys}" + undo_note(words, ("korean", keys)), "en"),
+            (f"영어 상태에서 친 {keys} → {hangul}" + undo_note(words, ("english", keys)), "ko"),
+        ], guess_add_target(keys, lex))
     item = ("korean" if target == "en" else "english", keys)
 
     def edit(words):
@@ -402,13 +409,19 @@ def other_language_warning(item, lex):
 
 def cmd_keep(args):
     keys, script = parse_word(args.word)
-    if args.target:
-        state = "english" if args.target == "en" else "korean"
-    else:
-        # Prefer the state the user has already been undoing; otherwise keep the word as written.
-        undone = [s for s in ("english", "korean") if (s, keys) in Words(Path(args.settings)).undone]
-        state = undone[0] if len(undone) == 1 else ("english" if script == "latin" else "korean")
-    item = (state, keys)
+    target = args.target
+    if not target:
+        # Guess the state the user has already been undoing; otherwise keep the word as written.
+        hangul, words = to_hangul(keys), Words(Path(args.settings))
+        undone = [t for t, s in (("en", "english"), ("ko", "korean")) if (s, keys) in words.undone]
+        guess = undone[0] if len(undone) == 1 else ("en" if script == "latin" else "ko")
+        target = choose(f"'{args.word}'를 어떻게 그대로 둘까요?", [
+            (f"영어 상태에서 친 {particle(keys, '을', '를')} {particle(hangul, '으로', '로')} 안 바꾸기"
+             + undo_note(words, ("english", keys)), "en"),
+            (f"한글 상태에서 친 {particle(hangul, '을', '를')} {particle(keys, '으로', '로')} 안 바꾸기"
+             + undo_note(words, ("korean", keys)), "ko"),
+        ], guess)
+    item = ("english" if target == "en" else "korean", keys)
 
     def edit(words):
         if words.is_kept(item) and item not in words.always:
@@ -478,6 +491,8 @@ EXAMPLES = """\
   ct forget absy      어느 목록에서든 그 말을 지워요 (잘못 배운 말, 잘못 더한 말)
   ct list             지금 목록을 보여 줘요
 
+add와 keep은 두 가지 해석을 보여 주고 추측한 쪽을 Enter로 확인받아요.
+--en(영어가 남게) 또는 --ko(한글이 남게)를 붙이면 묻지 않고 바로 써요.
 바꿀 때마다 Catchtype을 잠깐 껐다 켜요. 고치기 전 설정은 %APPDATA%\\Catchtype\\ct-backups에 남아요.
 """
 
