@@ -1,13 +1,20 @@
 # catchtype-words
 
-Catchtype Windows판의 단어 목록을 터미널에서 고치는 개인용 도구예요.
+Catchtype의 단어 목록을 터미널에서 고치는 개인용 도구예요.
 Windows판에는 Mac판의 "무조건 바꿀 말" 같은 목록 화면이 없어서 만들었어요.
-이 PC의 Catchtype Windows판(0.3.0-beta.9.1에서 확인)만 다뤄요.
+Catchtype Windows판(0.3.0-beta.9.1)과 Mac판(0.3.0)에서 확인했어요.
+Mac판은 설정 화면에서 같은 목록을 고칠 수 있어요. 그걸로 충분하면 이 도구는 필요 없어요.
 
 ## 준비
 
-- 이미 설치된 Python만 쓰고, 따로 설치할 패키지는 없어요.
-- 이 폴더가 사용자 PATH에 들어 있어서 어느 터미널에서든 `ct`로 실행해요.
+- 이미 설치된 Python만 쓰고, 따로 설치할 패키지는 없어요. Mac에서는 시스템 `python3`(3.9 이상)로 돌아요.
+- Windows: 이 폴더가 사용자 PATH에 들어 있어서 어느 터미널에서든 `ct`로 실행해요.
+- Mac: 받은 뒤 `ct` 별칭을 만들어요. 계속 쓰려면 별칭 줄을 `~/.zshrc`에도 넣어요.
+
+```
+git clone https://github.com/hyukjunlim/catchtype-words.git ~/catchtype-words
+alias ct='python3 -I ~/catchtype-words/ct.py'
+```
 
 ## 낱말마다 정하는 것
 
@@ -44,8 +51,13 @@ ct list           지금 목록 보기
 
 ## 동작 방식
 
-Catchtype이 읽는 설정은 `%APPDATA%\Catchtype\settings.json`이에요.
-공식 문서가 없어서, 아래 형식은 직접 확인한 거예요.
+Catchtype은 Windows와 Mac에서 같은 세 목록을 같은 형식으로 저장해요.
+공식 문서가 없어서, 아래 내용은 직접 확인한 거예요.
+
+| | Windows | Mac |
+|---|---|---|
+| 설정 | `%APPDATA%\Catchtype\settings.json` | 환경설정 `com.hebbianai.catchtype` (`defaults`로 읽고 써요) |
+| 고치기 전 백업 (최근 30개) | `%APPDATA%\Catchtype\ct-backups` | `~/Library/Application Support/Catchtype/ct-backups` |
 
 | 항목 | 형식 | 뜻 |
 |---|---|---|
@@ -56,17 +68,22 @@ Catchtype이 읽는 설정은 `%APPDATA%\Catchtype\settings.json`이에요.
 상태는 키를 칠 때의 입력 상태(`korean`/`english`)이고, 키는 실제로 누른 영문 키예요.
 
 - Catchtype이 켜져 있으면 설정을 다시 덮어써요. 그래서 바꿀 때마다 잠깐 끄고, 고친 뒤 다시 켜요.
+  Windows판은 보통 종료 요청을 무시해서 강제로 끄고, Mac판은 보통대로 종료해요.
 - 설정 형식이 예상과 다르면(예: Catchtype 업데이트) 아무것도 쓰지 않고 멈춰요.
-- 고치기 전 설정은 `%APPDATA%\Catchtype\ct-backups`에 최근 30개까지 남아요.
 - 실제 설정을 바꾸거나 `ct list`를 할 때마다 세 목록 사본을 `my-words.json`에 남겨요. 개인 단어가 담기므로 git에는 올리지 않아요.
 
 ## 되돌리기
 
-Catchtype을 끄고, `ct-backups`에서 원하는 파일을 `settings.json` 자리에 복사한 뒤 다시 켜요.
+- Windows: Catchtype을 끄고, `ct-backups`에서 원하는 파일을 `settings.json` 자리에 복사한 뒤 다시 켜요.
+- Mac: Catchtype을 끄고, 아래 명령을 친 뒤 다시 켜요.
+
+```
+defaults import com.hebbianai.catchtype <백업 파일>
+```
 
 ## 파일
 
 - `ct.py`: 도구 본체
-- `ct.cmd`: `ct` 명령으로 실행하게 해 주는 파일
+- `ct.cmd`: Windows에서 `ct` 명령으로 실행하게 해 주는 파일
 - `my-words.json`: 지금 목록의 사본 (git에 올리지 않음)
 - `CONSTRAINTS.md`: 이 도구가 지키는 범위와 규칙

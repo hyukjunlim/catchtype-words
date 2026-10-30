@@ -1,6 +1,6 @@
 # CONSTRAINTS
 
-Catchtype Windows판의 단어 목록을 터미널 명령으로 고치는 개인용 도구.
+Catchtype(Windows·Mac)의 단어 목록을 터미널 명령으로 고치는 개인용 도구.
 
 ## 대상과 위치
 - Catchtype Windows판(이 PC)과 Mac판을 다룬다. Mac판은 다른 사람이 시험해 준다.
