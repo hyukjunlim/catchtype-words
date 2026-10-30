@@ -1,6 +1,7 @@
-"""ct: fix Catchtype (Windows) word lists from the terminal.
+"""ct: fix Catchtype word lists from the terminal, on Windows and macOS.
 
-Catchtype keeps its word lists in %APPDATA%\\Catchtype\\settings.json, in a format with no public spec:
+Catchtype keeps its word lists in %APPDATA%\\Catchtype\\settings.json on Windows and in the preferences domain
+com.hebbianai.catchtype on macOS, in the same format with no public spec:
   alwaysConvertedWords  "state\\tkeys\\tunixtime"  always switch these keys to the other language
   undoneWords           "count\\tstate\\tkeys"     how often a conversion of these keys was undone
   learnedWordDates      "state\\tkeys\\tunixtime"  when the keys reached 3 undos and became kept-as-typed
@@ -13,19 +14,29 @@ import csv
 import ctypes
 import json
 import os
+import plistlib
 import re
-import shutil
 import subprocess
 import sys
 import time
 import unicodedata
-from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
+MAC = sys.platform == "darwin"
 REPO = Path(__file__).resolve().parent
-SETTINGS = Path(os.environ["APPDATA"]) / "Catchtype" / "settings.json"
-DEFAULT_EXE = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Catchtype" / "Catchtype.exe"
+if MAC:
+    DOMAIN = "com.hebbianai.catchtype"
+    SETTINGS = DOMAIN  # read and written through `defaults`, so the system's cached copy stays in step
+    BACKUP_DIR = Path.home() / "Library" / "Application Support" / "Catchtype" / "ct-backups"
+    BACKUP_HINT = "~/Library/Application Support/Catchtype/ct-backups"
+    APP = Path("/Applications/Catchtype.app")
+    DEFAULT_EXE = APP / "Contents" / "MacOS" / "Catchtype"
+else:
+    SETTINGS = str(Path(os.environ["APPDATA"]) / "Catchtype" / "settings.json")
+    BACKUP_DIR = Path(os.environ["APPDATA"]) / "Catchtype" / "ct-backups"
+    BACKUP_HINT = "%APPDATA%\\Catchtype\\ct-backups"
+    DEFAULT_EXE = Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Catchtype" / "Catchtype.exe"
 SNAPSHOT = REPO / "my-words.json"
 CACHE_DIR = REPO / ".cache"
 UNDOS_TO_LEARN = 3  # Catchtype: "같은 말을 세 번 되돌리면 다음부터 친 그대로 둬요"
@@ -216,7 +227,55 @@ def undo_note(words, item):
     return f"  (되돌린 기록 {count}번)" if count else ""
 
 
-# ---------- settings.json ----------
+# ---------- settings ----------
+
+def uses_defaults(target):
+    return MAC and target == DOMAIN
+
+
+def is_plist(target):
+    return uses_defaults(target) or str(target).endswith(".plist")
+
+
+def read_settings(target):
+    """Catchtype's settings and their raw bytes; `target` is the macOS domain, or a JSON or .plist file."""
+    try:
+        if uses_defaults(target):
+            raw = subprocess.run(["defaults", "export", DOMAIN, "-"], capture_output=True, check=True).stdout
+        else:
+            raw = Path(target).read_bytes()
+    except FileNotFoundError:
+        raise Stop(f"{target}이 없어요. Catchtype을 한 번 켠 뒤 다시 해 주세요.")
+    except subprocess.CalledProcessError as e:
+        raise Stop(f"Catchtype 설정을 읽지 못했어요({e.stderr.decode(errors='replace').strip()}).")
+    try:
+        settings = plistlib.loads(raw) if is_plist(target) else json.loads(raw.decode("utf-8-sig"))
+    except ValueError as e:
+        raise Stop(f"{target}을 읽지 못했어요({e}). 아무것도 고치지 않았어요.")
+    if uses_defaults(target) and not settings:
+        raise Stop("Catchtype 설정이 비어 있어요. Catchtype을 한 번 켠 뒤 다시 해 주세요.")
+    return settings, raw
+
+
+def write_settings(target, settings):
+    if uses_defaults(target):
+        try:
+            subprocess.run(["defaults", "import", DOMAIN, "-"], input=plistlib.dumps(settings),
+                           capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise Stop(f"Catchtype 설정을 쓰지 못했어요({e.stderr.decode(errors='replace').strip()}). "
+                       f"고치기 전 설정은 {BACKUP_HINT}에 있어요.")
+        return
+    if is_plist(target):
+        data = plistlib.dumps(settings)
+    else:
+        # Same layout Catchtype writes: sorted keys, two-space indent, "key" : value.
+        data = json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True, separators=(",", " : ")).encode()
+    path = Path(target)
+    tmp = path.with_name(path.name + ".ct-tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
 
 ENTRY = {
     "alwaysConvertedWords": re.compile(r"(korean|english)\t([^\t]+)\t(\d+)"),
@@ -228,15 +287,10 @@ ENTRY = {
 class Words:
     """The three word lists, keyed by (state, keys), in file order."""
 
-    def __init__(self, path):
-        try:
-            self.settings = json.loads(path.read_text(encoding="utf-8-sig"))
-        except FileNotFoundError:
-            raise Stop(f"{path}이 없어요. Catchtype을 한 번 켠 뒤 다시 해 주세요.")
-        except json.JSONDecodeError as e:
-            raise Stop(f"{path}을 읽지 못했어요({e}). 아무것도 고치지 않았어요.")
+    def __init__(self, target):
+        self.settings, self.raw = read_settings(target)
         if not isinstance(self.settings, dict):
-            raise Stop(f"{path}의 형식이 예상과 달라 아무것도 고치지 않았어요.")
+            raise Stop(f"{target}의 형식이 예상과 달라 아무것도 고치지 않았어요.")
         self.always, self.learned, self.undone = {}, {}, {}
         for name, pattern in ENTRY.items():
             entries = self.settings.get(name, [])
@@ -262,21 +316,16 @@ class Words:
             "undoneWords": [f"{c}\t{s}\t{k}" for (s, k), c in self.undone.items()],
         }
 
-    def save(self, path):
-        settings = {**self.settings, **self.lists()}
-        # Same layout Catchtype writes: sorted keys, two-space indent, "key" : value.
-        text = json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True, separators=(",", " : "))
-        tmp = path.with_name(path.name + ".ct-tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+    def save(self, target):
+        write_settings(target, {**self.settings, **self.lists()})
 
-
-def backup(path):
-    folder = path.parent / "ct-backups"
-    folder.mkdir(exist_ok=True)
-    shutil.copy2(path, folder / f"settings-{datetime.now():%Y%m%d-%H%M%S-%f}.json")
-    for old in sorted(folder.glob("settings-*.json"))[:-BACKUPS_KEPT]:
-        old.unlink()
+    def backup(self, target):
+        folder = BACKUP_DIR if uses_defaults(target) else Path(target).parent / "ct-backups"
+        suffix = ".plist" if is_plist(target) else ".json"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"settings-{datetime.now():%Y%m%d-%H%M%S-%f}{suffix}").write_bytes(self.raw)
+        for old in sorted(folder.glob(f"settings-*{suffix}"))[:-BACKUPS_KEPT]:
+            old.unlink()
 
 
 def snapshot(words):
@@ -285,15 +334,21 @@ def snapshot(words):
 
 # ---------- the Catchtype process ----------
 
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenProcess.restype = wintypes.HANDLE
-kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
-                                                ctypes.POINTER(wintypes.DWORD)]
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+if not MAC:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 
 def catchtype_pids():
+    if MAC:
+        out = subprocess.run(["pgrep", "-x", "Catchtype"], capture_output=True, text=True).stdout
+        return [int(pid) for pid in out.split()]
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Catchtype.exe", "/FO", "CSV", "/NH"],
                          capture_output=True, text=True, errors="replace").stdout
     return [int(row[1]) for row in csv.reader(out.splitlines()) if len(row) > 1 and row[0].lower() == "catchtype.exe"]
@@ -321,44 +376,54 @@ def wait_until(condition, seconds):
 
 
 def stop_catchtype():
-    """Quit Catchtype and return its executable path, or None if it wasn't running."""
+    """Quit Catchtype and return what to start it again with, or None if it wasn't running."""
     pids = catchtype_pids()
     if not pids:
         return None
-    exe = image_path(pids[0]) or DEFAULT_EXE
-    # Catchtype ignores a normal close request (tested on 0.3.0-beta.9.1), so end it directly.
-    for pid in pids:
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    if MAC:
+        # A normal quit works on macOS (tested on 0.3.0) and leaves the word lists as they were.
+        app = APP
+        subprocess.run(["osascript", "-e", f'quit app id "{DOMAIN}"'], capture_output=True)
+        if not wait_until(lambda: not catchtype_pids(), 5):
+            subprocess.run(["killall", "Catchtype"], capture_output=True)
+    else:
+        app = image_path(pids[0]) or DEFAULT_EXE
+        # Catchtype ignores a normal close request (tested on 0.3.0-beta.9.1), so end it directly.
+        for pid in pids:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
     if not wait_until(lambda: not catchtype_pids(), 5):
         raise Stop("Catchtype을 끄지 못했어요. 메뉴에서 'Catchtype 종료'를 누른 뒤 다시 해 주세요.")
-    return exe
+    return app
 
 
-def start_catchtype(exe):
-    # Launch through explorer so Catchtype isn't tied to this terminal's process tree.
-    subprocess.run(["explorer.exe", str(exe)])
+def start_catchtype(app):
+    if MAC:
+        subprocess.run(["open", "-b", DOMAIN])
+    else:
+        # Launch through explorer so Catchtype isn't tied to this terminal's process tree.
+        subprocess.run(["explorer.exe", str(app)])
     if not wait_until(catchtype_pids, 10):
-        print(f"Catchtype을 다시 켜지 못했어요. {exe}를 직접 열어 주세요.", file=sys.stderr)
+        print(f"Catchtype을 다시 켜지 못했어요. 직접 열어 주세요: {app}", file=sys.stderr)
 
 
 def change(args, edit):
     """Apply `edit(words) -> messages` and then `settle`; stops Catchtype and writes only if the lists changed."""
-    path = Path(args.settings)
-    words = Words(path)
+    target = args.settings
+    words = Words(target)
     before = words.lists()
     messages = edit(words) + settle(words)
     if words.lists() != before:
-        exe = None if args.no_restart else stop_catchtype()
+        app = None if args.no_restart else stop_catchtype()
         try:
-            words = Words(path)  # re-read: Catchtype may have saved on its way out
+            words = Words(target)  # re-read: Catchtype may have saved on its way out
             messages = edit(words) + settle(words)
-            backup(path)
-            words.save(path)
-            if path == SETTINGS:
+            words.backup(target)
+            words.save(target)
+            if target == SETTINGS:
                 snapshot(words)
         finally:
-            if exe:
-                start_catchtype(exe)
+            if app:
+                start_catchtype(app)
     print("\n".join(messages))
 
 
@@ -399,7 +464,7 @@ def cmd_add(args):
     lex = Lexicon(DEFAULT_EXE)
     target = args.target
     if not target:
-        hangul, words = to_hangul(keys), Words(Path(args.settings))
+        hangul, words = to_hangul(keys), Words(args.settings)
         target = choose(f"'{args.word}'를 어느 쪽으로 늘 바꿀까요?", [
             (f"한글 상태에서 친 {hangul} → {keys}" + undo_note(words, ("korean", keys)), "en"),
             (f"영어 상태에서 친 {keys} → {hangul}" + undo_note(words, ("english", keys)), "ko"),
@@ -480,7 +545,7 @@ def cmd_forget(args):
                 messages.append(f"{kind}에서 지웠어요: {typed_form(item)} ({where(item)})")
         return messages
 
-    before = Words(Path(args.settings))
+    before = Words(args.settings)
     if not any((s, keys) in d for s in ("korean", "english") for d in (before.always, before.learned, before.undone)):
         print(f"목록에 없는 말이에요: {args.word} (키: {keys})")
         return
@@ -498,8 +563,8 @@ def show(rows):
 
 
 def cmd_list(args):
-    words = Words(Path(args.settings))
-    if Path(args.settings) == SETTINGS:
+    words = Words(args.settings)
+    if args.settings == SETTINGS:
         snapshot(words)
     implied = {(other_state(s), k) for s, k in words.always}  # shown on the always-convert line instead
     decided = set(words.always) | implied
@@ -532,7 +597,7 @@ def cmd_list(args):
         print(f"  (이미 늘 바꾸는 말의 되돌린 기록 {len(hidden)}개는 숨겼어요. 다음에 ct로 바꿀 때 지워요.)")
 
 
-EXAMPLES = """\
+EXAMPLES = f"""\
 예:
   ct add 채며쇅       안 바뀐 말을 늘 바꿔요 (ct add coauthor 도 같아요)
                       영어 상태에서 친 coauthor는 그대로 두는 것도 함께 넣어요
@@ -543,7 +608,7 @@ EXAMPLES = """\
 
 add는 두 가지 해석을 보여 주고 추측한 쪽을 Enter로 확인받아요.
 --en(영어가 남게) 또는 --ko(한글이 남게)를 붙이면 묻지 않고 바로 써요.
-바꿀 때마다 Catchtype을 잠깐 껐다 켜요. 고치기 전 설정은 %APPDATA%\\Catchtype\\ct-backups에 남아요.
+바꿀 때마다 Catchtype을 잠깐 껐다 켜요. 고치기 전 설정은 {BACKUP_HINT}에 남아요.
 """
 
 
@@ -551,7 +616,7 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     hidden = argparse.ArgumentParser(add_help=False)
-    hidden.add_argument("--settings", default=str(SETTINGS), help=argparse.SUPPRESS)
+    hidden.add_argument("--settings", default=SETTINGS, help=argparse.SUPPRESS)
     hidden.add_argument("--no-restart", action="store_true", help=argparse.SUPPRESS)
 
     parser = argparse.ArgumentParser(prog="ct", description="Catchtype 단어 목록을 고쳐요.", epilog=EXAMPLES,
