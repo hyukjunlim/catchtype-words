@@ -58,7 +58,7 @@ Catchtype이 읽는 설정은 `%APPDATA%\Catchtype\settings.json`이에요.
 - Catchtype이 켜져 있으면 설정을 다시 덮어써요. 그래서 바꿀 때마다 잠깐 끄고, 고친 뒤 다시 켜요.
 - 설정 형식이 예상과 다르면(예: Catchtype 업데이트) 아무것도 쓰지 않고 멈춰요.
 - 고치기 전 설정은 `%APPDATA%\Catchtype\ct-backups`에 최근 30개까지 남아요.
-- 실제 설정을 바꾸거나 `ct list`를 할 때마다 세 목록 사본을 `my-words.json`에 남겨요.
+- 실제 설정을 바꾸거나 `ct list`를 할 때마다 세 목록 사본을 `my-words.json`에 남겨요. 개인 단어가 담기므로 git에는 올리지 않아요.
 
 ## 되돌리기
 
@@ -68,5 +68,5 @@ Catchtype을 끄고, `ct-backups`에서 원하는 파일을 `settings.json` 자�
 
 - `ct.py`: 도구 본체
 - `ct.cmd`: `ct` 명령으로 실행하게 해 주는 파일
-- `my-words.json`: 지금 목록의 사본
+- `my-words.json`: 지금 목록의 사본 (git에 올리지 않음)
 - `CONSTRAINTS.md`: 이 도구가 지키는 범위와 규칙
